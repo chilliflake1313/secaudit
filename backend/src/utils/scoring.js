@@ -1,18 +1,24 @@
-function severityWeight(severity) {
-  if (severity === "critical") return 40;
-  if (severity === "high") return 20;
-  if (severity === "medium") return 10;
-  return 5;
-}
-
 function calculateScore(issues = []) {
   if (!issues.length) return 100;
 
-  let penalty = 0;
+  let critical = 0;
+  let high = 0;
+  let medium = 0;
+  let low = 0;
 
   for (const issue of issues) {
-    penalty += severityWeight(issue.severity);
+    if (issue.severity === "critical") critical++;
+    else if (issue.severity === "high") high++;
+    else if (issue.severity === "medium") medium++;
+    else low++;
   }
+
+  // Capped penalties per severity level (prevent linear collapse)
+  const penalty =
+    Math.min(critical * 40, 60) +
+    Math.min(high * 20, 50) +
+    Math.min(medium * 10, 30) +
+    Math.min(low * 5, 20);
 
   const score = 100 - penalty;
 

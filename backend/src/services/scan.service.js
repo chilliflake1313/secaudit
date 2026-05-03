@@ -2,47 +2,6 @@ const Scan = require("../models/Scan");
 const { calculateScore } = require("../utils/scoring");
 const { calculateConfidence } = require("../utils/confidence");
 const { deduplicate } = require("../utils/dedup");
-const { retry } = require("../utils/retry");
-
-async function runScan(scanId) {
-  const scan = await Scan.findById(scanId);
-  if (!scan) return;
-
-  scan.status = "running";
-  await scan.save();
-
-  try {
-    const toolResults = [];
-
-    const issuesRaw = await retry(() => runChecks(scan.target));
-
-    toolResults.push({ status: "done" });
-
-    const issues = deduplicate(issuesRaw);
-
-    const score = calculateScore(issues);
-
-    const confidence = calculateConfidence(toolResults);
-
-    scan.status = "completed";
-    scan.issues = issues;
-    scan.score = score;
-    scan.confidence = confidence;
-    scan.coverage_percent = Math.round(
-      (toolResults.filter((t) => t.status === "done").length /
-        toolResults.length) *
-        100
-    );
-    scan.warnings = [];
-
-    await scan.save();
-  } catch (err) {
-    scan.status = "failed";
-    scan.error = err.message;
-    await scan.save();
-  }
-}
-
 const fetch = require("node-fetch");
 const { exec } = require("child_process");
 const util = require("util");
@@ -87,7 +46,7 @@ async function checkDependencies(pkg) {
     if (/^(?:\^|~)?0\./.test(version)) {
       issues.push({
         title: `Risky version: ${name}`,
-        severity: "medium",
+        severity: "low",
         description: `Using pre-1.0 version (${version})`,
         fix: "Upgrade to a stable version"
       });
@@ -208,53 +167,116 @@ async function runNpmAudit(target) {
   }
 }
 
-async function runChecks(target) {
-  let issues = [];
-  if (isGithub(target)) {
-    const repo = normalizeRepo(target);
+// Parallel multi-tool engine
+const tools = [
+  {
+    name: "deps_basic",
+    run: async (target) => {
+      if (!isGithub(target)) return [];
 
-    if (!repo) {
-      return [
-        {
-          title: "Invalid repo format",
-          severity: "low",
-          description: "Could not parse repository URL",
-          fix: "Use github.com/owner/repo format"
-        }
-      ];
+      const repo = normalizeRepo(target);
+      if (!repo) return [];
+
+      const pkg = await fetchPackageJson(repo.owner, repo.repo);
+
+      if (!pkg) {
+        return [
+          {
+            title: "No package.json",
+            severity: "low",
+            description: "Dependency analysis not possible",
+            fix: "Ensure repo has package.json"
+          }
+        ];
+      }
+
+      return checkDependencies(pkg);
     }
-
-    const pkg = await fetchPackageJson(repo.owner, repo.repo);
-
-    if (pkg) {
-      issues.push(...(await checkDependencies(pkg)));
+  },
+  {
+    name: "npm_audit",
+    run: async (target) => {
+      if (!isGithub(target)) return [];
+      return runNpmAudit(target);
     }
-
-    // REAL vulnerability scan via npm audit (with timeout)
-    try {
-      issues.push(...(await withTimeout(runNpmAudit(target), 20000)));
-    } catch (err) {
-      issues.push({
-        title: "Audit timeout",
-        severity: "low",
-        description: "npm audit timed out",
-        fix: "Try again or increase timeout"
-      });
-    }
-  } else {
-    try {
-      issues.push(...(await withTimeout(checkWebsite(target), 10000)));
-    } catch (err) {
-      issues.push({
-        title: "Website check timeout",
-        severity: "low",
-        description: "Website checks timed out",
-        fix: "Try again or increase timeout"
-      });
+  },
+  {
+    name: "http_headers",
+    run: async (target) => {
+      if (isGithub(target)) return [];
+      return checkWebsite(target);
     }
   }
+];
 
-  return issues;
+async function runScan(scanId) {
+  const scan = await Scan.findById(scanId);
+  if (!scan) return;
+
+  scan.status = "running";
+  await scan.save();
+
+  try {
+    const toolResults = [];
+
+    const results = await Promise.allSettled(
+      tools.map(async (tool) => {
+        try {
+          const data = await withTimeout(tool.run(scan.target), 20000);
+
+          return {
+            name: tool.name,
+            status: "done",
+            issues: data
+          };
+        } catch (err) {
+          return {
+            name: tool.name,
+            status: "failed",
+            issues: []
+          };
+        }
+      })
+    );
+
+    let issuesRaw = [];
+
+    for (const r of results) {
+      if (r.status === "fulfilled") {
+        toolResults.push({
+          name: r.value.name,
+          status: r.value.status
+        });
+
+        issuesRaw.push(...r.value.issues);
+      }
+    }
+
+    const issues = deduplicate(issuesRaw);
+
+    const score = calculateScore(issues);
+
+    const confidence = calculateConfidence(toolResults);
+
+    const coverage = Math.round(
+      (toolResults.filter((t) => t.status === "done").length /
+        toolResults.length) *
+        100
+    );
+
+    scan.status = "completed";
+    scan.issues = issues;
+    scan.score = score;
+    scan.confidence = confidence;
+    scan.coverage_percent = coverage;
+    scan.warnings = [];
+
+    await scan.save();
+  } catch (err) {
+    scan.status = "failed";
+    scan.error = err.message;
+    await scan.save();
+  }
 }
 
 module.exports = { runScan };
