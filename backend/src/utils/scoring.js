@@ -9,9 +9,8 @@ function calculateScore(issues = []) {
   }
 
   if (score < 0) score = 0;
+
   return score;
 }
 
-module.exports = {
-  calculateScore
-};
+module.exports = { calculateScore };

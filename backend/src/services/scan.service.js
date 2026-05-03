@@ -1,5 +1,6 @@
 const Scan = require("../models/Scan");
 const { calculateScore } = require("../utils/scoring");
+const { retry } = require("../utils/retry");
 
 async function runScan(scanId) {
   const scan = await Scan.findById(scanId);
@@ -9,7 +10,7 @@ async function runScan(scanId) {
   await scan.save();
 
   try {
-    const issues = await runChecks(scan.target);
+    const issues = await retry(() => runChecks(scan.target));
 
     const score = calculateScore(issues);
 
@@ -39,6 +40,4 @@ async function runChecks(target) {
   ];
 }
 
-module.exports = {
-  runScan
-};
+module.exports = { runScan };
