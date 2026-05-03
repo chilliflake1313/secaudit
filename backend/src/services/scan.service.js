@@ -36,6 +36,7 @@ const execAsync = util.promisify(exec);
 const os = require("os");
 const path = require("path");
 const fs = require("fs").promises;
+const { withTimeout } = require("../utils/timeout");
 
 function isGithub(target) {
   return /github\.com\/[^/]+\/[^/]+/i.test(target);
@@ -215,10 +216,28 @@ async function runChecks(target) {
       issues.push(...(await checkDependencies(pkg)));
     }
 
-    // REAL vulnerability scan via npm audit
-    issues.push(...(await runNpmAudit(target)));
+    // REAL vulnerability scan via npm audit (with timeout)
+    try {
+      issues.push(...(await withTimeout(runNpmAudit(target), 20000)));
+    } catch (err) {
+      issues.push({
+        title: "Audit timeout",
+        severity: "low",
+        description: "npm audit timed out",
+        fix: "Try again or increase timeout"
+      });
+    }
   } else {
-    issues.push(...(await checkWebsite(target)));
+    try {
+      issues.push(...(await withTimeout(checkWebsite(target), 10000)));
+    } catch (err) {
+      issues.push({
+        title: "Website check timeout",
+        severity: "low",
+        description: "Website checks timed out",
+        fix: "Try again or increase timeout"
+      });
+    }
   }
 
   return issues;

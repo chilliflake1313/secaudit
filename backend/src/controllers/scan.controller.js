@@ -1,5 +1,5 @@
 const Scan = require("../models/Scan");
-const { runScan } = require("../services/scan.service");
+const { scanQueue } = require("../queue/scan.queue");
 
 exports.createScan = async (req, res) => {
   const { target } = req.body;
@@ -9,7 +9,7 @@ exports.createScan = async (req, res) => {
     status: "pending"
   });
 
-  runScan(scan._id);
+  await scanQueue.add("scan", { scanId: scan._id });
 
   res.json({ id: scan._id });
 };
