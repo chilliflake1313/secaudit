@@ -1,16 +1,22 @@
+function severityWeight(severity) {
+  if (severity === "critical") return 40;
+  if (severity === "high") return 20;
+  if (severity === "medium") return 10;
+  return 5;
+}
+
 function calculateScore(issues = []) {
-  let score = 100;
+  if (!issues.length) return 100;
+
+  let penalty = 0;
 
   for (const issue of issues) {
-    if (issue.severity === "critical") score -= 40;
-    else if (issue.severity === "high") score -= 20;
-    else if (issue.severity === "medium") score -= 10;
-    else score -= 5;
+    penalty += severityWeight(issue.severity);
   }
 
-  if (score < 0) score = 0;
+  const score = 100 - penalty;
 
-  return score;
+  return Math.max(0, score);
 }
 
 module.exports = { calculateScore };

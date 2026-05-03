@@ -1,5 +1,7 @@
 const Scan = require("../models/Scan");
 const { calculateScore } = require("../utils/scoring");
+const { calculateConfidence } = require("../utils/confidence");
+const { deduplicate } = require("../utils/dedup");
 const { retry } = require("../utils/retry");
 
 async function runScan(scanId) {
@@ -10,15 +12,27 @@ async function runScan(scanId) {
   await scan.save();
 
   try {
-    const issues = await retry(() => runChecks(scan.target));
+    const toolResults = [];
+
+    const issuesRaw = await retry(() => runChecks(scan.target));
+
+    toolResults.push({ status: "done" });
+
+    const issues = deduplicate(issuesRaw);
 
     const score = calculateScore(issues);
+
+    const confidence = calculateConfidence(toolResults);
 
     scan.status = "completed";
     scan.issues = issues;
     scan.score = score;
-    scan.confidence = "medium";
-    scan.coverage_percent = 65;
+    scan.confidence = confidence;
+    scan.coverage_percent = Math.round(
+      (toolResults.filter((t) => t.status === "done").length /
+        toolResults.length) *
+        100
+    );
     scan.warnings = [];
 
     await scan.save();
