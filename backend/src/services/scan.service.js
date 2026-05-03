@@ -30,6 +30,12 @@ async function runScan(scanId) {
 }
 
 const fetch = require("node-fetch");
+const { exec } = require("child_process");
+const util = require("util");
+const execAsync = util.promisify(exec);
+const os = require("os");
+const path = require("path");
+const fs = require("fs").promises;
 
 function isGithub(target) {
   return /github\.com\/[^/]+\/[^/]+/i.test(target);
@@ -79,52 +85,52 @@ async function checkDependencies(pkg) {
 async function checkWebsite(target) {
   const issues = [];
 
-  if (!/^https:\/\//i.test(target)) {
-    issues.push({
-      title: "No HTTPS",
-      severity: "high",
-      description: "Site is not using HTTPS",
-      fix: "Enable HTTPS"
-    });
-  }
-
   try {
     const res = await fetch(target, { redirect: "follow", timeout: 7000 });
 
-    const finalUrl = res.url || target;
-    const headers = res.headers;
+    const url = res.url || target;
+    const h = res.headers;
 
-    if (!/^https:\/\//i.test(finalUrl)) {
+    if (!url.startsWith("https://")) {
       issues.push({
-        title: "No HTTPS (after redirects)",
+        title: "No HTTPS",
         severity: "high",
         description: "Final URL is not HTTPS",
-        fix: "Force HTTPS redirects"
+        fix: "Enable HTTPS"
       });
     }
 
-    if (!headers.get("strict-transport-security")) {
+    if (!h.get("strict-transport-security")) {
       issues.push({
         title: "Missing HSTS",
         severity: "medium",
-        description: "Strict-Transport-Security header not set",
-        fix: "Add HSTS header"
+        description: "No HSTS header",
+        fix: "Add Strict-Transport-Security"
       });
     }
 
-    if (!headers.get("content-security-policy")) {
+    if (!h.get("content-security-policy")) {
       issues.push({
         title: "Missing CSP",
         severity: "medium",
-        description: "Content-Security-Policy header not set",
+        description: "No Content Security Policy",
         fix: "Add CSP header"
+      });
+    }
+
+    if (!h.get("x-frame-options")) {
+      issues.push({
+        title: "Missing X-Frame-Options",
+        severity: "low",
+        description: "Clickjacking protection missing",
+        fix: "Add X-Frame-Options"
       });
     }
   } catch {
     issues.push({
       title: "Site unreachable",
       severity: "medium",
-      description: "Could not fetch site",
+      description: "Failed to fetch site",
       fix: "Check availability"
     });
   }
@@ -132,9 +138,63 @@ async function checkWebsite(target) {
   return issues;
 }
 
+function mapSeverity(s) {
+  if (s === "critical") return "critical";
+  if (s === "high") return "high";
+  if (s === "moderate") return "medium";
+  return "low";
+}
+
+async function runNpmAudit(target) {
+  const repo = normalizeRepo(target);
+  if (!repo) return [];
+
+  const tmpDir = path.join(os.tmpdir(), `secaudit-${Date.now()}`);
+
+  try {
+    await execAsync(`git clone --depth=1 https://github.com/${repo.owner}/${repo.repo}.git "${tmpDir}"`);
+
+    const installCmd = `cd "${tmpDir}" && npm install --ignore-scripts --no-audit --no-fund`;
+    await execAsync(installCmd, { timeout: 120000 });
+
+    const { stdout } = await execAsync(`cd "${tmpDir}" && npm audit --json`, { timeout: 120000 });
+
+    const data = JSON.parse(stdout || '{}');
+    const issues = [];
+
+    if (data.vulnerabilities) {
+      for (const [name, vuln] of Object.entries(data.vulnerabilities)) {
+        issues.push({
+          title: `Vulnerable package: ${name}`,
+          severity: mapSeverity(vuln.severity || vuln.severity),
+          description: vuln.title || "Known vulnerability",
+          fix: "Run npm audit fix"
+        });
+      }
+    }
+
+    try {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    } catch {}
+
+    return issues;
+  } catch (err) {
+    try {
+      await fs.rm(tmpDir, { recursive: true, force: true });
+    } catch {}
+    return [
+      {
+        title: "Audit failed",
+        severity: "low",
+        description: "Could not run npm audit",
+        fix: "Check repository setup"
+      }
+    ];
+  }
+}
+
 async function runChecks(target) {
   let issues = [];
-
   if (isGithub(target)) {
     const repo = normalizeRepo(target);
 
@@ -151,16 +211,12 @@ async function runChecks(target) {
 
     const pkg = await fetchPackageJson(repo.owner, repo.repo);
 
-    if (!pkg) {
-      issues.push({
-        title: "No package.json",
-        severity: "low",
-        description: "Dependency analysis not possible",
-        fix: "Ensure project has package.json"
-      });
-    } else {
+    if (pkg) {
       issues.push(...(await checkDependencies(pkg)));
     }
+
+    // REAL vulnerability scan via npm audit
+    issues.push(...(await runNpmAudit(target)));
   } else {
     issues.push(...(await checkWebsite(target)));
   }
